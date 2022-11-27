@@ -6,6 +6,7 @@ from typing import List, Tuple
 from tvsclib.stage import Stage
 from tvsclib.system_identification_interface import SystemIdentificationInterface
 from tvsclib.system_interface import SystemInterface
+from tvsclib.math import cost
 
 class StrictSystem(SystemInterface):
     def __init__(self, causal:bool, system_identification:SystemIdentificationInterface = None, stages:List[Stage] = None):
@@ -27,6 +28,51 @@ class StrictSystem(SystemInterface):
             self.stages = stages
         else:
             raise AttributeError("Not enough arguments provided")
+
+    def __str__(self) -> String:
+        """creates a String representation
+
+        """
+
+        if self.causal:
+            text  = "Causal System:\n"
+        else:
+            text  = "Anticausal System:\n"
+
+        text += "    State dimensions: "+str(self.dims_state)+"\n"
+        text += "    Input dimensions: "+str(self.dims_in)+"\n"
+        text += "    Output dimensions:"+str(self.dims_out)+"\n"
+
+        return text
+
+    def description(self) -> String:
+        """
+            returns short description of properties
+        """
+        description = str(self)
+        reachable = self.is_reachable()
+        observable = self.is_observable()
+
+        if observable and reachable:
+            description += "    System is minimal"
+        else:
+            if observable:
+                description += "    System is observable"
+            if reachable:
+                description += "    System is reachable"
+        if not observable and not reachable:
+            description += "    System is neither reachable nor observable"
+
+        if self.is_input_normal():
+            description +="    System is input normal"
+        if self.is_output_normal():
+            description +="    System is output normal"
+        if self.is_balanced():
+            description +="    System is balanced"
+        if self.is_ordered():
+            description +="    System is ordered"
+        return description
+
 
     def copy(self) -> StrictSystem:
         """copy Returns a copy of this system
@@ -58,10 +104,45 @@ class StrictSystem(SystemInterface):
     def dims_state(self) -> List[int]:
         """dims_state State dimensions for each time step
 
+        For causal systems the indexing is consistent with the formula.
+        For anticausal systems one has to use dims_state[k+1] to get the k-th state dim,
+        as the -1-th state dim is included as first element.
+
         Returns:
             List[int]: State dimensions for each time step
         """
-        return [el.dim_state for el in self.stages]
+        dims = [el.dim_state for el in self.stages]
+        if self.causal:
+            dims.append(self.stages[-1].A_matrix.shape[0])
+            return dims
+        else:
+            dims.insert(0,self.stages[0].A_matrix.shape[0])
+            return dims
+
+
+    @property
+    def T(self) -> MixedSystem:
+        """transpose Transposed system
+
+        Returns:
+            StrictSystem: Transposition result
+        """
+        return self.transpose()
+
+    def cost(self,include_add=False,include_D=True) -> integer:
+        """calculate the cost of the system
+
+        this function return the number of FLOPs required to evalaute the system
+        if include_add is set to False, thsi is also the number of parameters
+        Args:
+            include_add (bool):     If True the number of additions is inluded. Default is False
+            inlcude_D   (bool):     If True the D-matrices are included. Default is False
+
+                Returns:
+                    int:  Number of FLOPs
+        """
+        return cost(self.dims_in,self.dims_out,self.dims_state,self.causal,
+                include_add=include_add,include_D=include_D)
 
     def compute(
         self, input:np.ndarray, start_index:int=0,
@@ -216,27 +297,156 @@ class StrictSystem(SystemInterface):
             np.vstack(x_vectors[0:k]),
             np.vstack(y_vectors))
 
-    def is_reachable(self) -> bool:
+    def is_minimal(self,tol:float = 1e-7) -> bool:
+        """is_minimal Check if the system is both observable and reachable
+
+        Args:
+            tol: (float, optional): epsilon for rank calculation. Default is 1e-7=sqrt(1e-14).
+
+        Returns:
+            bool: True if system is minimal, false otherwise
+        """
+        return self.is_reachable(tol=tol) and self.is_observable(tol=tol)
+
+    def is_reachable(self,tol:float = 1e-7) -> bool:
         """is_reachable Check if all internal states can be reached
+
+        Args:
+            tol: (float, optional): epsilon for rank calculation. Default is 1e-7=sqrt(1e-14).
 
         Returns:
             bool: True if system is fully reachable, false otherwise
         """
-        reach_matricies = self.reachability_matricies()
-        for i in range(len(reach_matricies)):
-            if np.linalg.det(reach_matricies[i] @ reach_matricies[i].transpose()) == 0:
-                return False
+        for i in range(1,len(self.stages)):
+            R = self.reachability_matrix(i)
+            if min(R.shape)!=0:
+                if np.linalg.matrix_rank(R,tol=tol)<R.shape[0]:
+                    return False
         return True
 
-    def is_observable(self) -> bool:
+    def is_observable(self,tol:float = 1e-7) -> bool:
         """is_observable Check if internal states can be infered from output
+
+        Args:
+            tol: (float, optional): epsilon for rank calculation. Default is 1e-7=sqrt(1e-14).
 
         Returns:
             bool: True if system is fully observable, false otherwise
         """
-        obs_matricies = self.observability_matricies()
-        for i in range(len(obs_matricies)):
-            if np.linalg.det(obs_matricies[i].transpose() @ obs_matricies[i]) == 0:
+        for i in range(1,len(self.stages)):
+            O = self.observability_matrix(i)
+            if min(O.shape)!=0:
+                if np.linalg.matrix_rank(O,tol=tol)<O.shape[1]:
+                    return False
+        return True
+
+    def is_input_normal(self) -> bool:
+        """is_input_nomral Check if the realization is input normal
+            Checks if the rows in the reachability matries are orthogonal
+
+        Args:
+            tolerance
+
+        Returns:
+            bool: True if system is input normal
+        """
+        for i in range(len(self.stages)):
+            if not np.allclose(self.stages[i].A_matrix@self.stages[i].A_matrix.T+
+                self.stages[i].B_matrix@self.stages[i].B_matrix.T,np.eye(self.stages[i].A_matrix.shape[0])):
+                return False
+        return True
+
+
+    def is_output_normal(self) -> bool:
+        """is_output_nomral Check if the realization is output normal
+            Checks if the collumns in the observability matries are orthogonal
+
+        Args:
+            tolerance
+
+        Returns:
+            bool: True if system is output normal
+        """
+        for i in range(len(self.stages)):
+            if not np.allclose(self.stages[i].A_matrix.T@self.stages[i].A_matrix+
+                self.stages[i].C_matrix.T@self.stages[i].C_matrix,np.eye(self.stages[i].A_matrix.shape[1])):
+                return False
+        return True
+
+    def is_balanced(self,tolerance:float = 1e-14) -> bool:
+        """is_canonical Check if the implemention is BALANCED
+
+        Args:
+            tolerance
+
+        Returns:
+            bool: True if system is balanced
+        """
+        for i in range(1,len(self.stages)):
+            obs_matrix = self.observability_matrix(i)
+            reach_matrix = self.reachability_matrix(i)
+            obs_gramian = obs_matrix.T@obs_matrix
+            reach_gramian =reach_matrix@reach_matrix.T
+            d_obs = np.diag(obs_gramian).copy()
+            d_reach = np.diag(reach_gramian).copy()
+
+            #check if the vectors are orthogonal
+            np.fill_diagonal(obs_gramian,0)
+            np.fill_diagonal(reach_gramian,0)
+            obs_orth = np.all(np.abs(obs_gramian) <tolerance)
+            reach_orth = np.all(np.abs(reach_gramian) <tolerance)
+
+            if not (obs_orth and reach_orth and np.allclose(d_reach,d_obs)):
+                return False
+            #check if the singular values are in decreasing oder
+            #here we have a small margin for round-off error
+            #ordered = balanced and np.all(d_reach[1:]-d_reach[:-1]<1e-16)
+        return True
+
+    def is_ordered(self,tolerance:float = 1e-15) -> bool:
+        """is_canonical checks if realization is ordered
+
+        Check if the collumns in O are orthogonal and the rows in R orthogonal,
+        and they are ordered in by length in decreasing order
+
+        If the realization is ordered, the observability and
+        reachability matrices can be written as:
+
+        R = D_R V^T
+        O = U D_O
+
+        With V^T and U suborthogonal matrices
+        and D_R and D_O are diagonal matrices
+
+        H = OR = U D_O D_R V^T = UsV^T
+
+        If the system is ordered, the system can be approxiamted by cutting tailing states.
+
+        Note: do_i >= do_{i+1} and dr_i >= dr_{i+1} implies do_i dr_i <= do_{i+1}dr_{i+1}
+
+        Args:
+            tolerance
+
+        Returns:
+            bool: True if system is ordered
+        """
+        for i in range(1,len(self.stages)):
+            obs_matrix = self.observability_matrix(i)
+            reach_matrix = self.reachability_matrix(i)
+            obs_gramian = obs_matrix.T@obs_matrix
+            reach_gramian =reach_matrix@reach_matrix.T
+            d_obs = np.diag(obs_gramian).copy()
+            d_reach = np.diag(reach_gramian).copy()
+
+            #check if the vectors are orthogonal
+            np.fill_diagonal(obs_gramian,0)
+            np.fill_diagonal(reach_gramian,0)
+            obs_orth = np.all(np.abs(obs_gramian) <tolerance)
+            reach_orth = np.all(np.abs(reach_gramian) <tolerance)
+            #check if the singular values are in decreasing oder
+            #here we have a small margin for round-off error
+            ordered = np.all(d_obs[1:]-d_obs[:-1]<1e-16) and np.all(d_reach[1:]-d_reach[:-1]<1e-16)
+            if not (obs_orth and reach_orth and ordered):
                 return False
         return True
 
@@ -246,10 +456,12 @@ class StrictSystem(SystemInterface):
 
         Returns:
             List[np.ndarray]: Reachability matricies for each timestep
+
+        For causal systems the indexing is consistent with the indexing for the matrices.
+        For anticausal systems one has to use [k+1] to get the Reachability Matrix corresponding to state x_k,
+        as the Matrix corresponding to the state k=-1 is included as first element.
         """
-        if self.causal:
-            return self._reachability_matricies_causal()
-        return self._reachability_matricies_anticausal()
+        return [self.reachability_matrix(k) for k in range(len(self.stages)+1)]
 
     def observability_matricies(self) -> List[np.ndarray]:
         """observability_matricies Returns list of observability matricies.
@@ -257,86 +469,104 @@ class StrictSystem(SystemInterface):
 
         Returns:
             List[np.ndarray]: Observability matricies for each timestep
+
+        For causal systems the indexing is consistent with the indexing for the matrices.
+        For anticausal systems one has to use [k+1] to get the Observability Matrix corresponding to state x_k,
+        as the Matrix corresponding to the state k=-1 is included as first element.
+        """
+        return [self.observability_matrix(k) for k in range(len(self.stages)+1)]
+
+
+    def reachability_matrix(self,k:int) -> np.ndarray:
+        """reachability_matricx Returns reachability matrix for index k.
+        This represents the mapping from the relevant inputs to the state x
+        In the causal case the function returns the mapping to the state x_k [...,A_{k-1}B_{k-2},B_{k-1}]
+
+        In the anticausal case the function returns the mapping to the state x_{k+1} [B_{k},A{k}B_{k+1},....]
+        The change in the k for the anicausal case is done to make the indexing consistent with the indexing in the dim_state vector.
+
+        See also TVSC Lecture slides Unit 5.5 page 2.
+
+        Args:
+            k: (int): Index
+        Returns:
+            np.ndarray: Reachability matrix for timestep k
+
+        TODO: it is unclear how to deal with systems that have nonzero final state dims
         """
         if self.causal:
-            return self._observability_matricies_causal()
-        return self._observability_matricies_anticausal()
+            if k>0:
+                mats = [self.stages[k-1].B_matrix]
+                As = self.stages[k-1].A_matrix
+                for l in range(k-2,-1,-1):
+                    mats.append(As@self.stages[l].B_matrix)
+                    As = As@self.stages[l].A_matrix
+                mats.reverse()
+                return(np.hstack(mats))
+            else:
+                return np.zeros((self.stages[0].dim_state,0))
+        else:
+            if k<len(self.stages):
+                mats = [self.stages[k].B_matrix]
+                As = self.stages[k].A_matrix
+                for l in range(k+1,len(self.stages),1):
+                    mats.append(As@self.stages[l].B_matrix)
+                    As = As@self.stages[l].A_matrix
+                return(np.hstack(mats))
+            else:
+                return np.zeros((self.stages[-1].dim_state,0))
 
-    def _observability_matricies_causal(self) -> List[np.ndarray]:
-        """_observability_matricies_causal Returns list of observability matricies.
-        See TVSC Lecture slides Unit 5.5 page 2.
 
+    def observability_matrix(self,k:int) -> np.ndarray:
+        """observability_matricx Returns observability matrix for index k.
+        This represents the mapping from the state x to the relevant outputs
+        In the causal case the function returns the mapping form the state x_k:
+
+        [C_k,
+
+        C_{k+1}A_k,
+
+        ...]
+
+        In the anticausal case this is the mapping form the state x_{k+1}:
+
+        [...,
+
+        C_{k-2}A_{k-1},
+
+        C_{k-1}]
+        The change in the k for the anicausal case is done to make the indexing consistent with the indexing in the dim_state vector.
+
+        See also TVSC Lecture slides Unit 5.5 page 2.
+
+        Args:
+            i: (int): Index
         Returns:
-            List[np.ndarray]: Observability matricies for each timestep
+            np.ndarray: Reachability matrix for timestep k
+
+        TODO: it is unclear how to deal with systems that have nonzero final state dims
         """
-        all_obs_matricies:List[np.ndarray] = [np.zeros((0,0))]
-        for k in range(1,len(self.stages)):
-            obs_matrix_parts = []
-            for i in range(k,len(self.stages)):
-                o = self.stages[i].C_matrix
-                for n in range(i-1,k-1,-1):
-                    o = o @ self.stages[n].A_matrix
-                obs_matrix_parts.append(o)
-            all_obs_matricies.append(np.vstack(obs_matrix_parts))
-        return all_obs_matricies
-
-    def _reachability_matricies_causal(self) -> List[np.ndarray]:
-        """_reachability_matricies_causal Returns list of reachability matricies.
-        See TVSC Lecture slides Unit 5.5 page 2.
-
-        Returns:
-            List[np.ndarray]: Reachability matricies for each timestep
-        """
-        all_reach_matricies:List[np.ndarray] = [np.zeros((0,0))]
-        for k in range(1,len(self.stages)):
-            reach_matrix_parts = []
-            for i in range(k-1,-1,-1):
-                r = self.stages[i].B_matrix
-                for n in range(i+1,k):
-                    r = self.stages[n].A_matrix @ r
-                reach_matrix_parts.append(r)
-            reach_matrix_parts.reverse()
-            all_reach_matricies.append(np.hstack(reach_matrix_parts))
-        return all_reach_matricies
-
-    def _observability_matricies_anticausal(self) -> List[np.ndarray]:
-        """_observability_matricies_anticausal Returns list of observability matricies.
-        See TVSC Lecture slides Unit 5.5 page 2.
-
-        Returns:
-            List[np.ndarray]: Observability matricies for each timestep
-        """
-        all_obs_matricies:List[np.ndarray] = [np.zeros((0,0))]
-        for k in range(1,len(self.stages)):
-            obs_matrix_parts = []
-            for i in range(k,len(self.stages)):
-                o = self.stages[len(self.stages) - i - 1].C_matrix
-                for n in range(i-1,k-1,-1):
-                    o = o @ self.stages[len(self.stages) - n -1].A_matrix
-                obs_matrix_parts.append(o)
-            all_obs_matricies.append(np.vstack(obs_matrix_parts))
-        all_obs_matricies.reverse()
-        return all_obs_matricies
-
-    def _reachability_matricies_anticausal(self) -> List[np.ndarray]:
-        """_reachability_matricies_anticausal Returns list of reachability matricies.
-        See TVSC Lecture slides Unit 5.5 page 2.
-
-        Returns:
-            List[np.ndarray]: Reachability matricies for each timestep
-        """
-        all_reach_matricies:List[np.ndarray] = [np.zeros((0,0))]
-        for k in range(1,len(self.stages)):
-            reach_matrix_parts = []
-            for i in range(k-1,-1,-1):
-                r = self.stages[len(self.stages) - i - 1].B_matrix
-                for n in range(i+1,k):
-                    r = self.stages[len(self.stages) - n - 1].A_matrix @ r
-                reach_matrix_parts.append(r)
-            reach_matrix_parts.reverse()
-            all_reach_matricies.append(np.hstack(reach_matrix_parts))
-        all_reach_matricies.reverse()
-        return all_reach_matricies
+        if self.causal:
+            if k<len(self.stages):
+                mats = [self.stages[k].C_matrix]
+                As = self.stages[k].A_matrix
+                for l in range(k+1,len(self.stages),1):
+                    mats.append(self.stages[l].C_matrix@As)
+                    As = self.stages[l].A_matrix@As
+                return(np.vstack(mats))
+            else:
+                return np.zeros((0,self.stages[-1].A_matrix.shape[0]))
+        else:
+            if k>0:
+                mats = [self.stages[k-1].C_matrix]
+                As = self.stages[k-1].A_matrix
+                for l in range(k-2,-1,-1):
+                    mats.append(self.stages[l].C_matrix@As)
+                    As = self.stages[l].A_matrix@As
+                mats.reverse()
+                return(np.vstack(mats))
+            else:
+                return np.zeros((0,self.stages[0].A_matrix.shape[0]))
 
     def transpose(self) -> StrictSystem:
         """transpose Transposed system
@@ -394,7 +624,7 @@ class StrictSystem(SystemInterface):
                     @ self.stages[i].D_matrix) @ self.stages[i].D_matrix.transpose()
             else:
                 inverse_D = self.stages[i].D_matrix.transpose() \
-                    @ np.linalg.inv(self.stages[i].D_matrix @ self.stages[i].D_matrix.transpose())
+                    @ np.linalg.inv(self.stages[i].D_matrix @ self.stages[i].D_matrix.transpose())#TODO Pinv?
             inverse_B = self.stages[i].B_matrix @ inverse_D
             stages_inverse.append(Stage(
                 self.stages[i].A_matrix - inverse_B @ self.stages[i].C_matrix,
@@ -431,18 +661,11 @@ class StrictSystem(SystemInterface):
                 ])
             ])
             # Econ RQ-Decomposition
-            X_matrix = X_matrix[
-                range(X_matrix.shape[0]-1,-1,-1),:]
+            X_matrix = np.flipud(X_matrix)
             Q_matrix, R_matrix = np.linalg.qr(
                 X_matrix.transpose(), mode='reduced')
-            Q_matrix = Q_matrix.transpose()
-            Q_matrix = Q_matrix[
-                range(Q_matrix.shape[0]-1,-1,-1),:]
-            R_matrix = R_matrix.transpose()
-            R_matrix = R_matrix[
-                range(R_matrix.shape[0]-1,-1,-1),:]
-            R_matrix = R_matrix[
-                :,range(R_matrix.shape[1]-1,-1,-1)]
+            Q_matrix = np.flipud(Q_matrix.transpose())
+            R_matrix = np.fliplr(np.flipud(R_matrix.transpose()))
 
             no_rows_Y = R_matrix.shape[0] - system.stages[i].D_matrix.shape[0]
             no_cols_Y = R_matrix.shape[1] - system.stages[i].D_matrix.shape[0]
@@ -503,16 +726,11 @@ class StrictSystem(SystemInterface):
             ])
             # Econ QL-Decomposition
             X_matrix = X_matrix.transpose()
-            X_matrix = X_matrix[
-                range(X_matrix.shape[0]-1,-1,-1),:]
+            X_matrix = np.flipud(X_matrix)
             Q_matrix, L_matrix = np.linalg.qr(
                 X_matrix.transpose(), mode='reduced')
-            Q_matrix = Q_matrix[
-                :,range(Q_matrix.shape[1]-1,-1,-1)]
-            L_matrix = L_matrix[
-                range(L_matrix.shape[0]-1,-1,-1),:]
-            L_matrix = L_matrix[
-                :,range(L_matrix.shape[1]-1,-1,-1)]
+            Q_matrix = np.fliplr(Q_matrix)
+            L_matrix = np.fliplr(np.flipud(L_matrix))
 
             no_rows_Y = L_matrix.shape[0] - system.stages[i].D_matrix.shape[1]
             no_rows_Y = max(0, no_rows_Y)

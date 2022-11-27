@@ -6,12 +6,12 @@ from tvsclib.stage import Stage
 from tvsclib.system_identification_interface import SystemIdentificationInterface
 
 class SystemIdentificationSVD(SystemIdentificationInterface):
-    def __init__(self, toeplitz: ToeplitzOperator, form:CanonicalForm = CanonicalForm.BALANCED, epsilon:float = 0, relative:bool = True, max_states_local:int = -1):
+    def __init__(self, toeplitz: ToeplitzOperator, form:CanonicalForm = CanonicalForm.BALANCED, epsilon:float = 1e-15, relative:bool = True, max_states_local:int = -1):
         """__init__ This class can be used to identify a state-space system from a toeplitz operator.
         Args:
             toeplitz (ToeplitzOperator): Toeplitz operator which shall be decomposed.
             form (CanonicalForm, optional): Canonical System form which shall be produced. Defaults to CanonicalForm.BALANCED.
-            epsilon (float, optional): Lower limit for singular values, can be used for approximation. Defaults to 0.
+            epsilon (float, optional): Lower limit for singular values, can be used for approximation. Defaults to 1e-15
             relative (bool, optional): If true the epsilon value is realtive to sum of all singular values. Defaults to True.
             max_states_local (int, optional): Can be used to set a maximal local state dimension. Defaults to -1 (means no limit).
         """
@@ -20,7 +20,7 @@ class SystemIdentificationSVD(SystemIdentificationInterface):
         self.epsilon = epsilon
         self.relative = relative
         self.max_states_local = max_states_local
-    
+
     def get_stages(self, causal:bool) -> Sequence[Stage]:
         """get_stages Get time varying system stages from teoplitz operator
         Args:
@@ -71,7 +71,7 @@ class SystemIdentificationSVD(SystemIdentificationInterface):
         for i in range(len(A)):
             stages.append(Stage(A[i],B[i],C[i],D[i]))
         return stages
-    
+
     def _factorize_hankel(self, hankel: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """_factorize_hankel Factorizes a hankel matrix into observability and controlability matrix
         Args:
@@ -115,7 +115,7 @@ class SystemIdentificationSVD(SystemIdentificationInterface):
             )
         }[self.form](U,S,V,rank_approx)
         return (Obs,Con)
-    
+
     def _factorize_hankels(self, causal: bool) -> Tuple[Sequence[np.ndarray],Sequence[np.ndarray]]:
         """_factorize_hankels Factorizes the hankel matricies from toeplitz operator into observability and reachability matricies
         Args:
