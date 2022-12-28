@@ -10,10 +10,10 @@ class InputNormal(Transformation):
         """
         super().__init__(
             "input-normal",
-            self._transform_causal, 
+            self._transform_causal,
             self._transform_anticausal,
             lambda s: (s.is_minimal(), "System is not minimal"))
-    
+
     def _transform_causal(self, stages:List[Stage]) -> List[Stage]:
         """_transform_causal Transforms causal stages to input normal form
 
@@ -22,27 +22,30 @@ class InputNormal(Transformation):
 
         Returns:
             List[Stage]: Transformed causal stages
+
+        TODO: it is unclear if this is also true if the first/final state has dim =0
         """
+        if True:# not self.inplace
+            stages = [Stage(stage.A_matrix.copy(),stage.B_matrix.copy(),\
+            stage.C_matrix.copy(),stage.D_matrix.copy()) for stage in stages]
+
         k = len(stages)
-        t_matricies = [np.zeros((0,0))] * (k+1)
-        result = []
-        for i in range(k):
-            X_matrix = np.hstack([
-                stages[i].A_matrix @ t_matricies[i],
-                stages[i].B_matrix
-            ])
-            q,r = np.linalg.qr(X_matrix.transpose(), 'reduced')
-            l = r.transpose()
-            t_matricies[i+1] = l[0:l.shape[0],:][:,0:l.shape[0]]
-            A_matrix = np.linalg.inv(t_matricies[i+1]) @ stages[i].A_matrix @ t_matricies[i]
-            B_matrix = np.linalg.inv(t_matricies[i+1]) @ stages[i].B_matrix
-            C_matrix = stages[i].C_matrix @ t_matricies[i]
-            result.append(Stage(
-                A_matrix.copy(),
-                B_matrix.copy(),
-                C_matrix.copy(),
-                stages[i].D_matrix.copy()))
-        return result
+        for i in range(k-1):
+            Q, R = np.linalg.qr(np.hstack([stages[i].A_matrix,stages[i].B_matrix]).T,'reduced')
+            Q = Q.T
+            L = R.T
+            """Some Notes here:
+            L is the state transform S_{k+1}
+            The transformation A_k S_k was done in the previous step
+            The current transformation S_{k+1}^-1 A_k is implicitly been done by the LQ
+            This results in an overal transfromation
+                A_k'=S_{k+1}^-1 A_k S_k
+            """
+            stages[i].A_matrix=Q[:,:stages[i].A_matrix.shape[1]]
+            stages[i].B_matrix=Q[:,stages[i].A_matrix.shape[1]:]
+            stages[i+1].A_matrix = stages[i+1].A_matrix@L
+            stages[i+1].C_matrix = stages[i+1].C_matrix@L
+        return stages
 
 
     def _transform_anticausal(self, stages:List[Stage]) -> List[Stage]:
@@ -53,24 +56,22 @@ class InputNormal(Transformation):
 
         Returns:
             List[Stage]: Transformed anticausal stages
+
+        TODO: it is unclear if this is also true if the first/final state has dim =0
         """
+        if True:# not self.inplace
+            stages = [Stage(stage.A_matrix.copy(),stage.B_matrix.copy(),\
+            stage.C_matrix.copy(),stage.D_matrix.copy()) for stage in stages]
+
         k = len(stages)
-        s_matricies = [np.zeros((0,0))] * (k+1)
-        result = []
-        for i in range(k-1,-1,-1):
-            X_matrix = np.vstack([
-                s_matricies[i+1].transpose() @ stages[i].A_matrix.transpose(),
-                stages[i].B_matrix.transpose()
-            ])
-            q,r = np.linalg.qr(X_matrix, 'complete')
-            s_matricies[i] = (r[0:r.shape[1],:][:,0:r.shape[1]]).transpose()
-            A_matrix = np.linalg.inv(s_matricies[i]) @ stages[i].A_matrix @ s_matricies[i+1]
-            B_matrix = np.linalg.inv(s_matricies[i]) @ stages[i].B_matrix
-            C_matrix = stages[i].C_matrix @ s_matricies[i+1]
-            result.append(Stage(
-                A_matrix.copy(),
-                B_matrix.copy(),
-                C_matrix.copy(),
-                stages[i].D_matrix.copy()))
-        result.reverse()
-        return result
+        for i in range(k-1,0,-1):
+            Q, R = np.linalg.qr(np.hstack([stages[i].A_matrix,stages[i].B_matrix]).T,'reduced')
+            Q = Q.T
+            L = R.T
+
+            stages[i].A_matrix=Q[:,:stages[i].A_matrix.shape[1]]
+            stages[i].B_matrix=Q[:,stages[i].A_matrix.shape[1]:]
+            stages[i-1].A_matrix = stages[i-1].A_matrix@L
+            stages[i-1].C_matrix = stages[i-1].C_matrix@L
+
+        return stages
